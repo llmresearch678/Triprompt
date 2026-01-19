@@ -11,6 +11,9 @@ It addresses a key limitation of existing prompt-based segmentation methods.
 Most existing approaches model **what** an organ is and **where** it is, but ignore **how it deforms** across patients, anatomies, and disease stages.
 To overcome this limitation, TRIPROMPT introduces a **Population-level Deformation Prompt (PDP)** and integrates it with **structural** and **textual** prompts using a **query-centric alignment mechanism**, enabling robust segmentation under large anatomical variability.
 
+**Triprompt Framework**
+![MedicalImaging1-upgraded](https://github.com/user-attachments/assets/433a67ab-38f7-4992-89e7-c6d511c90f6f)
+
 ✨ **2. Key Contributions**
 
 1. **Shared 3D Backbone**:  
@@ -168,9 +171,13 @@ python inference.py
 - **Run voxel-wise, multi-label segmentation inference**
 - **Save predictions as NIfTI (.nii.gz) files**
 
-### **Output example:**
+### **Some of our model predicted output Results:**
 
-output/case_001_pred.nii.gz
+![M3_New_Upgraded](https://github.com/user-attachments/assets/1e7c7209-2417-4c69-8c5c-d0f792300eba)
+<img width="352" height="373" alt="Image_Medical_Paper2 (1)" src="https://github.com/user-attachments/assets/e59ae022-fa97-413a-8148-19568c9110f0" />
+<img width="706" height="698" alt="Image_Medical_Paper_1 (1)" src="https://github.com/user-attachments/assets/650c0e03-7b74-4d16-8c7b-1cc366f1d443" />
+
+
 
 ---
 
