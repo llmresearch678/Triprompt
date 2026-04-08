@@ -1,107 +1,113 @@
+"""
+text_prompt.py
+Medical Text Prompt Encoder (E_TEXT) for TRIPROMPT.
+Uses pretrained ClinicalBERT to encode class-specific medical descriptions into Q_t.
+"""
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from transformers import AutoModel
+from transformers import AutoTokenizer, AutoModel
+
+
+# Default class-specific medical text descriptions
+DEFAULT_CLASS_DESCRIPTIONS = [
+    "liver: large solid abdominal organ responsible for metabolism and detoxification",
+    "right kidney: bean-shaped retroperitoneal organ for urine filtration",
+    "spleen: lymphatic organ in the upper left abdomen for blood filtration",
+    "pancreas: elongated glandular organ producing digestive enzymes and insulin",
+    "aorta: main arterial trunk descending through the thorax and abdomen",
+    "inferior vena cava: large vein returning deoxygenated blood to the heart",
+    "right adrenal gland: small triangular endocrine gland above the right kidney",
+    "left adrenal gland: small triangular endocrine gland above the left kidney",
+    "gallbladder: pear-shaped sac beneath the liver storing bile",
+    "esophagus: muscular tube connecting the pharynx to the stomach",
+    "stomach: J-shaped digestive organ between the esophagus and small intestine",
+    "duodenum: first segment of the small intestine receiving chyme from the stomach",
+    "left kidney: bean-shaped retroperitoneal organ for urine filtration",
+]
 
 
 class TextPromptEncoder(nn.Module):
     """
-    Text Prompt Encoder (Qt).
-
-    This module encodes medical semantic information using a
-    pretrained clinical language model and projects it into
-    a shared embedding space for multimodal alignment with
-    segmentation queries and other prompts.
-
-    IMPORTANT (Paper-aligned design):
-    --------------------------------
-    1. Uses a pretrained clinical language model (no architectural changes).
-    2. Encodes *semantic priors only* (organ names, anatomy descriptions).
-    3. Does NOT access image data or segmentation masks.
-    4. Outputs a fixed-dimensional prompt embedding per class.
-
-    This design ensures semantic conditioning without data leakage
-    or task-specific bias.
+    E_TEXT: Maps class-specific medical text descriptions into semantic embeddings Q_t.
+    Uses ClinicalBERT as the pretrained language encoder.
+    Text prompts are class-level (not patient-specific) and fixed at inference.
     """
 
     def __init__(
         self,
-        model_name: str = "emilyalsentzer/Bio_ClinicalBERT",
-        embed_dim: int = 768,
-        freeze_text_encoder: bool = True
+        model_name="emilyalsentzer/Bio_ClinicalBERT",
+        embed_dim=256,
+        num_classes=13,
+        class_descriptions=None,
+        freeze_encoder=True,
     ):
-        """
-        Args:
-            model_name (str):
-                Name or path of the pretrained clinical language model.
-            embed_dim (int):
-                Dimensionality of the shared embedding space.
-            freeze_text_encoder (bool):
-                Whether to freeze the language model weights.
-                Default=True for training stability and reproducibility.
-        """
         super().__init__()
+        self.num_classes = num_classes
+        self.embed_dim = embed_dim
+        self.class_descriptions = class_descriptions or DEFAULT_CLASS_DESCRIPTIONS
+        assert len(self.class_descriptions) == num_classes, \
+            f"Expected {num_classes} descriptions, got {len(self.class_descriptions)}"
 
-        # ---------------------------------------------------
-        # 1. Pretrained medical language encoder
-        # ---------------------------------------------------
-        self.text_encoder = AutoModel.from_pretrained(model_name)
+        # Load ClinicalBERT tokenizer and model
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.bert = AutoModel.from_pretrained(model_name)
 
-        # Optionally freeze the language model
-        if freeze_text_encoder:
-            for param in self.text_encoder.parameters():
+        if freeze_encoder:
+            for param in self.bert.parameters():
                 param.requires_grad = False
 
-        # ---------------------------------------------------
-        # 2. Projection head
-        # ---------------------------------------------------
-        # Projects language embeddings into the shared
-        # prompt embedding space used by TRIPROMPT
-        self.proj = nn.Sequential(
-            nn.Linear(self.text_encoder.config.hidden_size, embed_dim),
+        # Projection head: BERT hidden size (768) -> embed_dim
+        self.projection = nn.Sequential(
+            nn.Linear(768, embed_dim),
             nn.LayerNorm(embed_dim),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+            nn.Linear(embed_dim, embed_dim),
         )
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor
-    ) -> torch.Tensor:
+        # Learnable textual prompt projection W_t
+        self.W_t = nn.Linear(embed_dim, embed_dim, bias=False)
+
+    def encode_texts(self, descriptions, device):
         """
-        Forward pass for text prompt encoding.
+        Tokenize and encode a list of text descriptions using ClinicalBERT.
+        Returns CLS token embeddings of shape (len(descriptions), 768).
+        """
+        tokens = self.tokenizer(
+            descriptions,
+            padding=True,
+            truncation=True,
+            max_length=128,
+            return_tensors="pt",
+        ).to(device)
 
-        Args:
-            input_ids (Tensor):
-                Tokenized text input IDs of shape (B, L),
-                where L is the token sequence length.
-            attention_mask (Tensor):
-                Attention mask of shape (B, L).
+        with torch.no_grad() if not self.training else torch.enable_grad():
+            outputs = self.bert(**tokens)
 
+        # Use CLS token as sentence representation
+        cls_embeddings = outputs.last_hidden_state[:, 0, :]  # (N, 768)
+        return cls_embeddings
+
+    def forward(self, device=None):
+        """
+        Encode all class descriptions and return text prompt tokens Q_t.
         Returns:
-            Tensor:
-                Text prompt embeddings of shape (B, embed_dim).
+            Q_t: text prompt tokens (num_classes, embed_dim)
         """
+        if device is None:
+            device = next(self.parameters()).device
 
-        # ---------------------------------------------------
-        # 1. Encode text semantics
-        # ---------------------------------------------------
-        outputs = self.text_encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            return_dict=True
-        )
+        # Encode all class descriptions
+        cls_embeddings = self.encode_texts(self.class_descriptions, device)  # (K, 768)
+        projected = self.projection(cls_embeddings)                           # (K, embed_dim)
+        Q_t = self.W_t(projected)                                             # (K, embed_dim)
+        return Q_t
 
-        # ---------------------------------------------------
-        # 2. CLS token pooling
-        # ---------------------------------------------------
-        # The CLS token is used as a global semantic summary
-        # of the medical text description.
-        cls_embedding = outputs.last_hidden_state[:, 0, :]
-
-        # ---------------------------------------------------
-        # 3. Projection to shared embedding space
-        # ---------------------------------------------------
-        text_prompt = self.proj(cls_embedding)
-
-        return text_prompt
+    def forward_batch(self, batch_size, device=None):
+        """
+        Returns Q_t expanded for a batch.
+        Returns:
+            Q_t: (B, num_classes, embed_dim)
+        """
+        Q_t = self.forward(device)                             # (K, embed_dim)
+        return Q_t.unsqueeze(0).expand(batch_size, -1, -1)    # (B, K, embed_dim)
