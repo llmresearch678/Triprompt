@@ -1,68 +1,65 @@
+"""
+backbone.py
+Swin-UNETR backbone wrapper for TRIPROMPT.
+Loads pretrained Swin-UNETR and exposes multi-scale feature maps.
+"""
+
 import torch
 import torch.nn as nn
 from monai.networks.nets import SwinUNETR
 
 
-class Backbone(nn.Module):
+class TripromptBackbone(nn.Module):
     """
-    Shared 3D Encoder Backbone for TRIPROMPT.
-
-    This module implements a Swin-UNETR backbone used as a
-    common volumetric feature extractor for all prompt modalities
-    (structural, textual, and deformation-aware) and the segmentation head.
-
-    IMPORTANT DESIGN CHOICES (Paper-aligned):
-    ----------------------------------------
-    1. The backbone architecture is used WITHOUT modification.
-    2. No prompt logic or conditioning is embedded here.
-    3. The backbone serves purely as a feature encoder.
-    4. Architectural novelty lies outside the backbone (in prompting).
-
-    This design ensures reproducibility, clarity of contribution,
-    and compliance with IJCAI / IEEE TMI review standards.
+    Swin-UNETR backbone for volumetric 3D feature extraction.
+    Returns multi-scale feature maps F = {f_l}_{l=1}^{L}.
     """
 
     def __init__(
         self,
-        img_size,
-        in_channels: int = 1,
-        feature_size: int = 48,
-        use_checkpoint: bool = False
+        img_size=(96, 96, 96),
+        in_channels=1,
+        out_channels=13,
+        feature_size=48,
+        pretrained_weights=None,
     ):
-        """
-        Args:
-            img_size (tuple or list):
-                Spatial size of the input volume (H, W, D).
-            in_channels (int):
-                Number of input channels.
-                Default = 1 for CT imaging.
-            feature_size (int):
-                Base feature size for Swin-UNETR.
-            use_checkpoint (bool):
-                Whether to use gradient checkpointing
-                (disabled by default for clarity and stability).
-        """
         super().__init__()
-
-        self.encoder = SwinUNETR(
+        self.swin_unetr = SwinUNETR(
             img_size=img_size,
             in_channels=in_channels,
-            out_channels=feature_size,
+            out_channels=out_channels,
             feature_size=feature_size,
-            use_checkpoint=use_checkpoint
+            use_checkpoint=True,
         )
+        if pretrained_weights is not None:
+            state_dict = torch.load(pretrained_weights, map_location="cpu")
+            # Load only encoder weights if full checkpoint
+            if "state_dict" in state_dict:
+                state_dict = state_dict["state_dict"]
+            self.swin_unetr.load_state_dict(state_dict, strict=False)
+            print(f"[Backbone] Loaded pretrained weights from {pretrained_weights}")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         """
-        Forward pass through the backbone.
-
         Args:
-            x (Tensor):
-                Input 3D volume of shape (B, C, H, W, D).
-
+            x: Input volume (B, C, H, W, D)
         Returns:
-            Tensor:
-                Dense volumetric feature representation produced
-                by Swin-UNETR, used for segmentation and prompt conditioning.
+            hidden_states: list of multi-scale feature tensors
+            decoder_out:   dense voxel-level embedding Z (B, H, W, D, C)
         """
-        return self.encoder(x)
+        hidden_states_out = self.swin_unetr.swinViT(x, self.swin_unetr.normalize)
+        # Decoder forward to get dense feature map Z
+        enc0 = self.swin_unetr.encoder1(x)
+        enc1 = self.swin_unetr.encoder2(hidden_states_out[0])
+        enc2 = self.swin_unetr.encoder3(hidden_states_out[1])
+        enc3 = self.swin_unetr.encoder4(hidden_states_out[2])
+        enc4 = self.swin_unetr.encoder10(hidden_states_out[4])
+
+        dec4 = self.swin_unetr.decoder5(enc4, hidden_states_out[3])
+        dec3 = self.swin_unetr.decoder4(dec4, enc3)
+        dec2 = self.swin_unetr.decoder3(dec3, enc2)
+        dec1 = self.swin_unetr.decoder2(dec2, enc1)
+        dec0 = self.swin_unetr.decoder1(dec1, enc0)
+
+        multi_scale_features = [enc0, enc1, enc2, enc3, enc4]
+        return multi_scale_features, dec0
